@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pandemonks · Big screen</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="screen">
+  <header>
+    <div class="logo"><span class="shout">PANDEMONKS</span><span class="hand">Go-Live!</span></div>
+    <div class="nowplaying" id="turn"></div>
+  </header>
+  <main><svg class="board" id="board" role="img" aria-label="Game board"></svg><div class="dock" id="dock" style="display:none" aria-live="polite"></div></main>
+  <aside>
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;align-items:flex-end">
+        <div><div class="kicker">Office time · go-live 17:30</div><div class="lcd" id="night" style="margin-top:6px">09:00</div></div>
+        <div style="text-align:right"><div class="kicker">Real time left</div><div class="head" id="real" style="font-size:40px;margin-top:4px">45:00</div><div class="kicker" id="paused" style="color:var(--sticky)"></div></div>
+      </div>
+    </div>
+    <div class="panel stack" style="gap:10px">
+      <div class="row" style="justify-content:space-between"><span class="head" style="font-size:20px">Escalations</span><span class="kicker">6 = client pulls the plug</span></div>
+      <div class="meter" id="quits"></div>
+      <div class="row" style="justify-content:space-between;margin-top:4px"><span class="head" style="font-size:20px">Crisis inbox</span><span class="kicker" id="decks"></span></div>
+      <div class="meter" id="rate"></div>
+    </div>
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;margin-bottom:10px"><span class="head" style="font-size:20px">Deadlines</span><span class="kicker">fires left in stock</span></div>
+      <div class="fixes" id="fixes"></div>
+    </div>
+    <div id="news"></div>
+    <div class="panel" style="padding:10px 12px"><div id="teams"></div></div>
+    <div class="slack"><div class="top"><span># nl-monk-news</span><span class="kicker">live</span></div><div class="msgs" id="slack"></div></div>
+  </aside>
+</div>
+
+<div class="lobby" id="lobby" style="display:none">
+  <div class="caption" style="align-self:flex-start;font-size:20px">Interactive NL PMs present</div>
+  <div class="hero">PANDEMONKS<span class="hand">Go-Live!</span></div>
+  <div class="row" style="gap:30px;align-items:flex-start">
+    <div class="paper" style="padding:18px 22px;font-size:24px;line-height:1.4;max-width:900px;font-weight:600">One laptop per team. Open <span class="mono" style="background:#000;color:#ffe45c;padding:2px 8px" id="joinUrl"></span>, pick your team number and give yourselves a name. The site goes live at 17:30, right before the borrel. Meet all four deadlines before then.</div>
+    <div class="sticky" style="width:260px;font-size:22px;transform:rotate(4deg)">Rule #1: describe your cards. Never show them. Rule #2: update the dashboard or hand over.</div>
+  </div>
+  <div class="slots" id="slots"></div>
+</div>
+
+<div id="fxlayer" aria-hidden="true"></div>
+<div class="tutorial" id="tutorial" style="display:none"></div>
+<button class="soundbtn" id="soundbtn" style="display:none">Click to turn on sound</button>
+<div class="overlay hidden" id="overlay"></div>
+
+<script src="app.js"></script>
+<script src="sound.js"></script>
+<script>
+/* ---------------- timeline: every server event plays in order ---------------- */
+let lastFx = null;
+const timeline = [];
+let busy = false;
+const hidden = {};          // pawn id -> number of pending move animations
+let skipCurrent = null;
+
+function hiddenSet() { return new Set(Object.keys(hidden).filter((k) => hidden[k] > 0)); }
+function drawBoard() { if (PM.state && PM.state.status !== 'lobby') renderBoard($('#board'), PM.state, { hidePawns: hiddenSet() }); }
+
+let tutStep = -1;
+function renderTutorial(s) {
+  const el = $('#tutorial');
+  const t = s.tutorial || {};
+  if (!t.on) { el.style.display = 'none'; tutStep = -1; return; }
+  const step = Math.min(t.step || 0, TUTORIAL.length - 1);
+  el.style.display = 'flex';
+  if (step === tutStep) return;
+  if (tutStep !== -1) SFX.play(step === TUTORIAL.length - 1 ? 'go' : 'slide');
+  tutStep = step;
+  const sl = TUTORIAL[step];
+  const last = step === TUTORIAL.length - 1;
+  el.innerHTML = `<div class="tut-top"><div class="logo"><span class="shout" style="font-size:44px">PANDEMONKS</span><span class="hand">how to play</span></div><div class="tut-dots">${TUTORIAL.map((_, i) => `<span class="${i === step ? 'on' : i < step ? 'done' : ''}"></span>`).join('')}</div></div>
+    <div class="tut-slide" key="${step}"><div class="kicker" style="font-size:18px">${esc(sl.kicker)}</div><h1>${esc(sl.title)}</h1><div class="tut-body${sl.wide ? ' wide' : ''}">${sl.body(PM.cfg, s)}</div></div>
+    <div class="tut-foot"><span class="kicker">${s.status === 'playing' ? 'Rules refresher · the game is paused for computer teams' : 'Game Master: use Next and Back in the control room'}</span><span class="caption" style="font-size:20px">${last ? (s.status === 'playing' ? 'Back to the game!' : "Waiting for: LET'S GO") : `${step + 1} / ${TUTORIAL.length}`}</span></div>`;
+  if (sl.after) sl.after(el, s);
+}
+
+function render(s) {
+  const cfg = PM.cfg;
+  SFX.setEnabled(s.sound !== false);
+  $('#soundbtn').style.display = s.sound !== false && !SFX.unlocked ? 'block' : 'none';
+  renderTutorial(s);
+  if (s.status === 'lobby') {
+    $('#lobby').style.display = 'flex';
+    $('#joinUrl').textContent = location.href.replace(/screen\.html.*$/, '') + 'team.html';
+    $('#slots').innerHTML = [1, 2, 3, 4].map((n) => {
+      const t = (s.teams || {})[n];
+      if (!t) return `<div class="slot paper open"><div class="kicker">Team ${n}</div><div class="nm">Open seat</div></div>`;
+      return `<div class="slot paper" style="transform:rotate(${[-1.5, 1, -0.5, 1.5][n - 1]}deg)"><div class="row" style="justify-content:space-between"><span class="kicker" style="color:#6a6258">Team ${n}</span>${t.bot ? '<span class="chip cpu">CPU</span>' : ''}</div><div class="nm">${esc(t.name)}</div><div style="margin-top:10px;font-size:15px;color:#4a4540">${esc(t.members || '')}</div><div style="height:8px;background:${teamColor(String(n))};border:2px solid #000;margin-top:14px"></div></div>`;
+    }).join('');
+    lastFx = s.fxSeq || 0;
+    timeline.length = 0;
+    return;
+  }
+  $('#lobby').style.display = 'none';
+
+  // queue new events (never replay old ones when the page loads mid-game)
+  if (lastFx === null) lastFx = s.fxSeq || 0;
+  if ((s.fxSeq || 0) < lastFx) { lastFx = s.fxSeq || 0; timeline.length = 0; for (const k in hidden) delete hidden[k]; }
+  for (const e of s.fx || []) {
+    if (e.seq <= lastFx) continue;
+    lastFx = e.seq;
+    timeline.push(e);
+    if ((e.type === 'move' || e.type === 'crash') && e.pawn) hidden[e.pawn] = (hidden[e.pawn] || 0) + 1;
+  }
+  drawBoard();
+
+  const active = activeTeamId(s);
+  const at = active ? s.teams[active] : null;
+  if (s.status === 'playing' && at) {
+    const phase = { actions: `${s.actionsLeft} action${s.actionsLeft === 1 ? '' : 's'} left`, draw: 'drawing cards', infect: 'flipping crises' }[s.phase];
+    const pips = Math.max(4, s.actionsLeft);
+    $('#turn').innerHTML = `<div class="kicker" style="margin-bottom:8px">Now on shift</div><span class="caption" style="background:${teamColor(active)}">${esc(at.name)}${at.bot ? ' · CPU' : ''}</span><div class="row" style="justify-content:flex-end;margin-top:10px"><span class="kicker">${phase}</span><span class="pips big" id="pips">${Array.from({ length: pips }, (_, i) => `<span class="pip ${i >= 4 ? 'bonus' : ''} ${s.phase === 'actions' && i < s.actionsLeft ? 'on' : ''}"></span>`).join('')}</span></div>`;
+  } else {
+    $('#turn').innerHTML = `<span class="caption" style="background:${s.status === 'won' ? '#7dffb2' : '#ff3b30'};font-size:34px">${s.status === 'won' ? "People's Lovie Winner" : 'The client printed it out'}</span><div class="kicker" style="margin-top:10px">${esc(s.result ? s.result.reason : '')}</div>`;
+  }
+
+  $('#quits').innerHTML = Array.from({ length: cfg.maxRageQuits }, (_, i) => `<span class="quit ${i < s.escalations ? 'done' : ''}">${i + 1}</span>`).join('');
+  $('#rate').innerHTML = cfg.rates.map((r, i) => `<span class="${i === s.rateIdx ? 'on' : i < s.rateIdx ? 'done' : ''}">${r}</span>`).join('');
+  $('#decks').textContent = `${s.projectDeck.length} project cards${s.quiet ? ' · client on holiday' : ''}`;
+  $('#fixes').innerHTML = Object.entries(cfg.colors).map(([k, c]) => {
+    const done = s.cured[k];
+    return `<div class="fix ${done ? 'done' : ''}" data-fix="${k}" style="${done ? `background:${c.hex}` : ''}">${glyph(k, 16)}<span class="head">${esc(c.fix)}</span><span class="left">${s.supply[k]} left</span>${done ? '<span class="stamp">DONE</span>' : ''}</div>`;
+  }).join('');
+  $('#teams').innerHTML = teamsList(s).map((t) => {
+    const role = cfg.roles[t.role] || {};
+    return `<div class="teamline ${t.id === active ? 'active' : ''}" data-team="${t.id}"><div class="badge" style="background:${teamColor(t.id)}">${t.id}</div><div style="min-width:0"><div style="font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</div><div class="kicker" style="font-size:10px">${esc(role.name || '')}${role.accent ? ' · ' + esc(role.accentName) : ''} · ${esc(cfg.rooms[t.loc].name)}</div></div><div class="row" style="gap:6px;justify-content:flex-end">${t.meditating ? '<span class="chip zen">MASSAGE</span>' : ''}${t.bot ? '<span class="chip cpu">CPU</span>' : ''}${stressHTML(t.stress || 0, cfg.maxStress)}${t.debt ? `<span class="chip debt" title="Handover: actions less next turn">-${t.debt}</span>` : ''}<span class="chip">${(t.hand || []).length}</span></div></div>`;
+  }).join('');
+  $('#slack').innerHTML = slackHTML(s.log, 16);
+  const eff = [];
+  const on = (k) => s.effects && s.effects[k] && (s.turnCount || 0) < s.effects[k];
+  if (on('notrains')) eff.push('No trains');
+  if (on('nointernet')) eff.push('No internet in AMS');
+  if (on('thomas')) eff.push('Approvals stuck abroad');
+  if (s.quiet) eff.push('Client on holiday');
+  if (teamsList(s).some((t) => t.owe)) eff.push('Hours owed');
+  if (teamsList(s).some((t) => t.minus)) eff.push('Timesheet week');
+  const n = s.lastNews;
+  $('#news').innerHTML = n || eff.length ? `<div class="newsbox">${n ? `<span class="tag">BREAKING · round ${s.round || 1}</span><div class="head">${esc(n.title)}</div><p>${esc(n.text)}</p>` : ''}${eff.length ? `<div class="effects">${eff.map((e) => `<span class="chip" style="background:#ffe45c;color:#000">${esc(e)}</span>`).join('')}</div>` : ''}</div>` : '';
+
+  pump();
+}
+
+/* ---------------- geometry ---------------- */
+function boardPt(x, y) {
+  const r = $('#board').getBoundingClientRect();
+  const k = Math.min(r.width / 1600, r.height / 900);
+  return [r.left + (r.width - 1600 * k) / 2 + x * k, r.top + (r.height - 900 * k) / 2 + y * k];
+}
+function roomPt(id, dy = 0) { const r = PM.cfg.rooms[id]; return boardPt(r.x, r.y + dy); }
+function badgePt(team) {
+  const el = document.querySelector(`.teamline[data-team="${team}"] .badge`);
+  if (!el) return boardPt(800, 450);
+  const b = el.getBoundingClientRect();
+  return [b.left + b.width / 2, b.top + b.height / 2];
+}
+function elPt(sel) { const el = $(sel); if (!el) return boardPt(800, 450); const b = el.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; }
+
+/* ---------------- tiny animation kit ---------------- */
+const layer = () => $('#fxlayer');
+let speed = 1;
+const wait = (ms) => new Promise((res) => setTimeout(res, ms * speed));
+function spawn(html, x, y, cls = '') {
+  const d = document.createElement('div');
+  d.className = 'fx ' + cls;
+  d.innerHTML = html;
+  d.style.left = x + 'px';
+  d.style.top = y + 'px';
+  layer().appendChild(d);
+  return d;
+}
+function travel(el, pts, ms) {
+  const kf = pts.map(([x, y]) => ({ left: x + 'px', top: y + 'px' }));
+  return el.animate(kf, { duration: ms * speed, easing: 'cubic-bezier(.45,0,.25,1)', fill: 'forwards' }).finished;
+}
+async function pop(html, x, y, cls, ms = 1100) {
+  const d = spawn(html, x, y, 'pop ' + cls);
+  d.style.animationDuration = ms * speed + 'ms';
+  await wait(ms);
+  d.remove();
+}
+async function flyCard(card, from, to, ms = 900, keep = 250) {
+  SFX.play('card');
+  const d = spawn(cardHTML(card, 'mini'), from[0], from[1], 'flycard');
+  await travel(d, [from, to], ms);
+  await wait(keep);
+  d.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 250 * speed, fill: 'forwards' });
+  await wait(250);
+  d.remove();
+}
+function pawnHTML(team) { return `<div class="gpawn" style="background:${teamColor(team)}">${team}</div>`; }
+function pulsePips() { const p = $('#pips'); if (p) p.animate([{ transform: 'scale(1.35)' }, { transform: 'scale(1)' }], { duration: 400 }); }
+
+async function animMove(e) {
+  const cfg = PM.cfg;
+  const from = cfg.rooms[e.from], to = cfg.rooms[e.to];
+  if (e.card) flyCard(e.card, badgePt(e.team), roomPt(e.to), 800, 150);
+  const g = spawn(pawnHTML(e.pawn), ...roomPt(e.from, 20), 'pawnfx');
+  if (e.cross) {
+    const fromLiving = from.office === 'ams' ? 'alive' : 'hlive';
+    const toLiving = to.office === 'ams' ? 'alive' : 'hlive';
+    if (e.from !== fromLiving) await travel(g, [roomPt(e.from, 20), roomPt(fromLiving)], 450);
+    g.style.opacity = 0;
+    SFX.play('train');
+    const tr = spawn(`<div class="gtrain"><span>NS</span><b style="background:${teamColor(e.pawn)}">${e.pawn}</b></div>`, ...roomPt(fromLiving), 'trainfx');
+    pop(`<span>+1 ACTION</span>`, ...boardPt(800, 205), 'tag-yellow', 1200);
+    await travel(tr, [roomPt(fromLiving), roomPt(toLiving)], 1100);
+    tr.remove();
+    g.style.opacity = 1;
+    if (e.to !== toLiving) await travel(g, [roomPt(toLiving), roomPt(e.to, 20)], 450);
+    else await travel(g, [roomPt(toLiving), roomPt(toLiving, 20)], 120);
+  } else {
+    const label = { dm: 'DM!', allhands: 'ALL-HANDS!', hop: 'HOP!', ops: 'SHORTCUT!', gather: 'COME HERE!', freelancer: 'FREELANCER!', martin: 'SIR MARTIN CALLS!' }[e.kind];
+    if (label) pop(`<span>${label}</span>`, ...roomPt(e.from, -40), 'tag-white', 900);
+    SFX.play(label ? 'whoosh' : 'step');
+    await travel(g, [roomPt(e.from, 20), roomPt(e.to, 20)], e.kind === 'walk' ? 650 : 800);
+  }
+  await wait(120);
+  g.remove();
+}
+
+/* ---------- the docked turn summary: stays until the next team does something ---------- */
+const ACTION_FX = ['move', 'treat', 'share', 'build', 'cure', 'espresso', 'dashboard', 'event', 'breather', 'discard', 'draw'];
+let dockAt = 0;
+const dockOn = () => $('#dock').style.display !== 'none';
+function crisisTag(c) {
+  const cfg = PM.cfg;
+  if (c.startsWith('crash:')) { const t = PM.state.teams[c.slice(6)]; return `<div class="dtag crash"><b>Caffeine crash</b><span>${esc(t ? t.name : 'a team')} goes to a chair massage</span></div>`; }
+  const [room, idx] = c.slice(2).split('#');
+  const r = cfg.rooms[room];
+  if (!r) return '';
+  return `<div class="dtag" style="border-color:${cfg.colors[r.color].hex}"><b>${glyph(r.color, 14)}${esc(r.name)}</b><span>${esc((r.crises || [])[+idx] || '')}</span></div>`;
+}
+function openDock(r) {
+  const d = $('#dock');
+  const panels = r.panels || [];
+  d.innerHTML = `<div class="dk-col"><div class="kicker">Last turn</div><div class="dk-title">${esc(r.title)}</div><div class="dk-chips">${panels.map((p, i) => `<span><i>${i + 1}</i>${esc(p.text)}</span>`).join('') || '<span>Nothing happened. Suspicious.</span>'}</div></div>
+    <div class="dk-col"><div class="kicker">New crises</div><div class="dk-tags">${(r.cards || []).map(crisisTag).join('') || `<div class="dtag calm"><b>${esc(r.sub || 'No new crises')}</b></div>`}</div><div class="dk-next" id="dknext"></div></div>`;
+  d.style.display = 'grid';
+  dockAt = Date.now();
+}
+async function closeDock() {
+  const left = 5000 - (Date.now() - dockAt);
+  if (left > 0) await new Promise((res) => setTimeout(res, left));
+  const d = $('#dock');
+  await d.animate([{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(30px)' }], { duration: 300 }).finished.catch(() => {});
+  d.style.display = 'none';
+}
+
+async function play(e) {
+  const cfg = PM.cfg;
+  if (dockOn() && ACTION_FX.includes(e.type)) await closeDock();
+  switch (e.type) {
+  case 'reveal': return showReveal(e.r);
+  case 'move': pulsePips(); return animMove(e);
+  case 'crash': {
+    pop(`<span>CRASH!</span>`, ...roomPt(e.from, -30), 'tag-purple', 1000);
+    SFX.play('crash');
+    return animMove({ ...e, kind: 'walk', cross: false });
+  }
+  case 'fire': {
+    // play every queued fire at once
+    const batch = [e];
+    while (timeline[0] && timeline[0].type === 'fire') batch.push(timeline.shift());
+    const done = batch.map((f, i) => wait(i * 90).then(() => (i < 4 && SFX.play('fire'), 0)).then(() => pop(`<svg width="54" height="62" viewBox="0 0 28 32" aria-hidden="true">${flameSvg(1, 1, cfg.colors[f.color].hex)}</svg><span class="plus">+1</span>`, ...roomPt(f.room, -10), 'flame', 1000)));
+    await Promise.all(done);
+    return;
+  }
+  case 'escalate': {
+    const [x, y] = roomPt(e.room);
+    pop(`<span>ESCALATED!</span>`, x, y, 'boom', 1300);
+    SFX.play('escalate');
+    $('#board').animate([{ transform: 'translate(0,0)' }, { transform: 'translate(-8px,4px)' }, { transform: 'translate(8px,-4px)' }, { transform: 'translate(0,0)' }], { duration: 400, iterations: 2 });
+    return wait(1300);
+  }
+  case 'treat': pulsePips(); SFX.play('poof'); return pop(`<span>POOF!</span><em>-${e.n}</em>`, ...roomPt(e.room), 'poof', 1100);
+  case 'share': {
+    pulsePips();
+    pop(`<span>${e.dir === 'give' ? 'HERE YOU GO!' : 'MINE NOW!'}</span>`, ...roomPt(e.room, -50), 'tag-white', 1200);
+    return flyCard(e.card, badgePt(e.from), badgePt(e.to), 1100, 200);
+  }
+  case 'build': {
+    pulsePips();
+    if (e.card) await flyCard(e.card, badgePt(e.team), roomPt(e.room), 700, 50);
+    SFX.play('stamp');
+    return pop(`<span>WAR ROOM!</span>`, ...roomPt(e.room), 'stamp', 1200);
+  }
+  case 'cure': {
+    pulsePips();
+    await Promise.all((e.cards || []).map((c, i) => wait(i * 140).then(() => flyCard(c, badgePt(e.team), roomPt(e.room), 800, 100))));
+    SFX.play('stamp');
+    return pop(`<span>DEADLINE MET!</span>`, ...roomPt(e.room), 'stamp green', 1100);
+  }
+  case 'espresso': SFX.play('espresso'); return pop(`${cupIcon(64)}<span class="plus">+${e.plus}</span>`, ...roomPt(e.room, -40), 'coffee', 1400);
+  case 'breather': pulsePips(); SFX.play('relax'); return pop(`${cupIcon(56)}<span class="plus">ahh</span>`, ...roomPt(e.room, -30), 'coffee', 1100);
+  case 'dashboard': pulsePips(); SFX.play('ding'); return pop(`<span>DASHBOARD ✓</span>`, ...roomPt(e.room, -40), 'tag-green', 1200);
+  case 'cookie': SFX.play('cookie'); return pop(`<div class="bigdebt">-${e.cost || 2}</div><span>HANDOVER!</span>`, ...roomPt(e.room, -30), 'cookiepop', 1500);
+  case 'massage': SFX.play('relax'); return pop(`<span>ahh...</span>`, ...roomPt(e.room, -30), 'tag-purple', 1200);
+  case 'draw': {
+    const from = elPt('#decks');
+    const to = badgePt(e.team);
+    await Promise.all(Array.from({ length: e.n }, (_, i) => wait(i * 200).then(async () => {
+      const d = spawn(`<div class="cardback">P</div>`, from[0], from[1], 'flycard');
+      await travel(d, [from, to], 800);
+      d.remove();
+    })));
+    return;
+  }
+  case 'discard': return flyCard(e.card, badgePt(e.team), elPt('#decks'), 800, 50);
+  case 'event': return flyCard(e.card, badgePt(e.team), boardPt(800, 450), 800, 300);
+  }
+}
+
+function pump() {
+  if (busy || !timeline.length) return;
+  if (PM.state && PM.state.tutorial && PM.state.tutorial.on) return;
+  busy = true;
+  speed = timeline.length > 10 ? 0.45 : timeline.length > 5 ? 0.7 : 1;
+  const e = timeline.shift();
+  Promise.resolve(play(e)).catch(() => {}).then(() => {
+    if ((e.type === 'move' || e.type === 'crash') && e.pawn && hidden[e.pawn]) { hidden[e.pawn] = Math.max(0, hidden[e.pawn] - 1); drawBoard(); }
+    busy = false;
+    pump();
+  });
+}
+
+const ICONS = {
+  train: '<b class="ic" style="background:#ffc917">NS</b>', walk: '<b class="ic">→</b>', poof: '<b class="ic" style="background:#7dffb2">POOF</b>',
+  swap: '<b class="ic" style="background:#60a5fa">⇄</b>', warroom: '<b class="ic" style="background:#000;color:#ffe45c">WAR</b>', playbook: '<b class="ic" style="background:#7dffb2">★</b>',
+  coffee: '', tick: '<b class="ic" style="background:#7dffb2">✓</b>', cookie: '<b class="ic" style="background:#ff9a3c">⇄</b>', star: '<b class="ic" style="background:#ffe45c">★</b>',
+  zz: '<b class="ic" style="background:#b9a6ff">ahh</b>', fire: '', boom: '<b class="ic" style="background:#ff3b30">!!</b>',
+};
+function iconHTML(i) {
+  if (i === 'coffee') return `<div class="icwrap">${cupIcon(60)}</div>`;
+  if (i === 'fire') return `<div class="icwrap"><svg width="52" height="60" viewBox="0 0 28 32" aria-hidden="true">${flameSvg(1, 1, '#ff6b35')}</svg></div>`;
+  return `<div class="icwrap">${ICONS[i] || ICONS.walk}</div>`;
+}
+
+/* scale a reveal down when the big screen is smaller than 1920x1080, so nothing falls off the edge */
+function fitReveal(ov) {
+  const el = ov.querySelector('.reveal');
+  if (!el) return;
+  el.style.transform = '';
+  const k = Math.min(1, (innerWidth * 0.94) / el.offsetWidth, (innerHeight * 0.92) / el.offsetHeight);
+  if (k < 1) el.style.transform = `scale(${k.toFixed(3)})`;
+}
+
+function showReveal(r) {
+  // the next team's turn: when the summary is docked, it just gets a "next up" line
+  if (r.kind === 'turn' && dockOn()) {
+    const n = $('#dknext');
+    if (n) { n.innerHTML = `<span>Next up</span><b>${esc(r.title)}</b><em>${esc(r.sub)}</em>`; n.animate([{ transform: 'scale(1.15)' }, { transform: 'scale(1)' }], { duration: 450 }); }
+    SFX.play('turn');
+    return wait(1400);
+  }
+  return new Promise((resolve) => {
+    const ov = $('#overlay');
+    ov.className = 'overlay ' + r.kind;
+    let ms;
+    const cardsHTML = (list, small) => list.map((c, i) => cardHTML(c, 'big').replace('class="card', `style="animation-delay:${(small ? 0.4 : 0.15) + i * 0.25}s" class="card`)).join('');
+    if (r.kind === 'recap' || r.kind === 'endturn') {
+      const panels = r.panels || [];
+      const cards = r.cards || [];
+      const pDelay = (i) => 0.2 + i * 0.45;
+      const after = panels.length * 0.45 + 0.4;
+      ov.innerHTML = `<div class="burst"></div><div class="reveal recap ${r.kind === 'endturn' ? 'endturn' : ''}"><h2>${esc(r.title)}</h2>
+        <div class="strip">${panels.map((p, i) => `<div class="cpanel" style="animation-delay:${pDelay(i)}s;transform:rotate(${[-2, 1.5, -1, 2, -1.5, 1][i % 6]}deg)">${iconHTML(p.icon)}<div class="ctext">${esc(p.text)}</div><div class="cnum">${i + 1}</div></div>`).join('')}</div>
+        ${r.kind === 'endturn' ? `<div class="crisisrow" style="animation-delay:${after}s"><div class="caption">New crises</div>${cards.length ? `<div class="cards">${cardsHTML(cards, true).replace(/animation-delay:([\d.]+)s/g, (m, d) => `animation-delay:${(+d + after).toFixed(2)}s`)}</div>` : `<p>${esc(r.sub || 'No new crises this turn.')}</p>`}</div>` : ''}</div>`;
+      ms = 2400 + panels.length * 1000 + cards.length * 900 + (r.kind === 'endturn' ? 3500 : 0);
+      if (cards.length) setTimeout(() => SFX.play('card'), after * 1000 * speed);
+    } else {
+      const cards = cardsHTML(r.cards || []);
+      ov.innerHTML = `<div class="burst"></div><div class="reveal"><h2>${esc(r.title)}</h2>${cards ? `<div class="cards">${cards}</div>` : ''}${r.sub ? `<p>${esc(r.sub)}</p>` : ''}</div>`;
+      ms = { turn: 2600, quiet: 4200, news: 10000, cookie: 5500, won: 1e9, lost: 1e9 }[r.kind] || (4200 + (r.cards || []).length * 900);
+    }
+    fitReveal(ov);
+    const snd = { friday: 'friday', ragequit: 'stamp', news: 'news', cure: 'playbook', won: 'win', lost: 'lose', turn: 'turn', start: 'news', quiet: 'relax', cookie: 'cookie', infect: 'card', event: 'whoosh', crash: 'relax' }[r.kind];
+    if (snd) SFX.play(snd);
+    if (r.kind === 'recap' || r.kind === 'endturn') (r.panels || []).forEach((_, i) => setTimeout(() => SFX.play('panel'), (200 + i * 450) * speed));
+    let done = false;
+    const close = () => {
+      if (done) return; done = true; ov.className = 'overlay hidden'; skipCurrent = null;
+      if (r.kind === 'endturn' && PM.state && PM.state.status === 'playing') openDock(r);
+      resolve();
+    };
+    skipCurrent = close;
+    setTimeout(close, ms * (r.kind === 'won' || r.kind === 'lost' ? 1 : speed));
+  });
+}
+addEventListener('resize', () => fitReveal($('#overlay')));
+
+function tick() {
+  const s = PM.state;
+  if (s && s.status !== 'lobby') {
+    const left = clockNow();
+    $('#night').textContent = nightTime();
+    $('#night').className = 'lcd' + (left <= 60 ? ' crit' : left <= 300 ? ' warn' : '');
+    $('#real').textContent = fmtClock(left);
+    $('#paused').textContent = s.clock && s.clock.pausedAt && s.status === 'playing' ? 'paused' : '';
+    stress(s, left);
+  }
+  setTimeout(tick, 300);
+}
+
+/* the stress layer: a ticking clock near go-live, a heartbeat when escalations pile up */
+let lastTickSec = null, lastBeat = 0;
+function stress(s, left) {
+  if (s.status !== 'playing' || (s.clock && s.clock.pausedAt) || (s.tutorial && s.tutorial.on)) return;
+  if (left !== lastTickSec) {
+    lastTickSec = left;
+    if (left <= 60) SFX.play('tick', true);
+    else if (left <= 300 && left % 2 === 0) SFX.play('tick', false);
+  }
+  const esc = s.escalations || 0;
+  const every = esc >= 5 ? 1100 : esc >= 4 ? 1700 : 0;
+  if (every && Date.now() - lastBeat > every) { lastBeat = Date.now(); SFX.play('heartbeat'); }
+}
+
+$('#overlay').addEventListener('click', () => { if (skipCurrent) skipCurrent(); });
+document.addEventListener('click', () => { SFX.unlock(); setTimeout(() => { $('#soundbtn').style.display = PM.state && PM.state.sound !== false && !SFX.unlocked ? 'block' : 'none'; }, 100); });
+document.addEventListener('keydown', () => SFX.unlock());
+window.addEventListener('resize', drawBoard);
+boot(render);
+tick();
+</script>
+</body>
+</html>

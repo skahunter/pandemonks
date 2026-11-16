@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pandemonks · Game Master</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="page" style="max-width:1440px">
+  <div class="row" style="justify-content:space-between;align-items:flex-end">
+    <div><div class="kicker">Game Master</div><div class="bigtitle" style="font-size:84px">Control room<span class="hand" style="font-size:36px">you are the studio lead</span></div></div>
+    <div style="text-align:right"><div class="lcd" id="night">09:00</div><div class="head" id="real" style="font-size:26px;margin-top:6px"></div></div>
+  </div>
+  <div id="controls" class="panel stack"></div>
+  <div style="display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:20px;align-items:start">
+    <div class="panel" style="padding:10px"><svg class="board" id="board" style="height:auto" role="img" aria-label="Game board"></svg><div class="kicker" style="margin:8px 6px 2px">Click a room to fix fires by hand</div></div>
+    <div class="stack">
+      <div class="panel"><h3>Teams</h3><div id="teams"></div></div>
+      <div class="slack" style="max-height:520px"><div class="top"><span># nl-monk-news</span><span class="kicker">full log</span></div><div class="msgs" id="log" style="mask-image:none"></div></div>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+<script>
+let pausedForRules = false;
+const SPEEDS = [['4.5', 'Relaxed (talk along)'], ['3', 'Normal'], ['1.2', 'Fast'], ['0.2', 'Turbo test']].map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+function startGame() { return act('start', { fridays: +($('#fr') ? $('#fr').value : 4), minutes: +($('#mn') ? $('#mn').value : 45), botDelay: +($('#sp') ? $('#sp').value : 3) }); }
+function tutGo(d) {
+  const s = PM.state, t = s.tutorial || {};
+  if (!t.on) return;
+  const last = TUTORIAL.length - 1, step = t.step || 0;
+  if (d > 0 && step >= last) return tutFinish();
+  act('tutorial', { on: true, step: Math.max(0, Math.min(last, step + d)) });
+}
+async function tutFinish() {
+  const s = PM.state;
+  await act('tutorial', { on: false, step: 0 });
+  if (s.status === 'lobby') {
+    if (teamsList(s).length < 2) return alert('You need at least two teams to start.');
+    await startGame();
+  } else if (pausedForRules) { pausedForRules = false; await act('resume', {}); }
+}
+async function tutOpen() {
+  const s = PM.state;
+  if (s.status === 'playing' && !(s.clock && s.clock.pausedAt)) { pausedForRules = true; await act('pause', {}); }
+  act('tutorial', { on: true, step: 0 });
+}
+function tutBar(s) {
+  const t = s.tutorial || {};
+  const sound = s.sound !== false;
+  const soundBtn = `<button class="small ${sound ? '' : 'dark'}" id="snd">${sound ? 'Sound on' : 'Sound off'}</button>`;
+  if (!t.on) return `<div class="row" style="justify-content:space-between;border-top:2px dashed var(--line,#0003);padding-top:12px"><div><span class="head" style="font-size:20px">How to play</span> <span class="muted">${s.status === 'lobby' ? 'Walk everyone through the rules on the big screen. Laptops show "eyes on the big screen" meanwhile.' : 'Show the rules again. The clock pauses while it is open.'}</span></div><div class="row">${soundBtn}<button class="small hot" id="tutopen">${s.status === 'lobby' ? 'Explain the game on the big screen' : 'Show the rules again'}</button></div></div>`;
+  const step = Math.min(t.step || 0, TUTORIAL.length - 1), last = step === TUTORIAL.length - 1;
+  const sl = TUTORIAL[step];
+  const finish = s.status === 'lobby' ? "Let's go!" : 'Back to the game';
+  return `<div class="row" style="justify-content:space-between;border-top:2px dashed var(--line,#0003);padding-top:12px"><div><span class="kicker">Slide ${step + 1} / ${TUTORIAL.length} on the big screen</span><div class="head" style="font-size:24px">${esc(sl.kicker)} ${esc(sl.title)}</div></div>
+    <div class="row">${soundBtn}<button class="small dark" id="tuthide">Hide</button><button class="small" id="tutback" ${step ? '' : 'disabled'}>Back</button>${last ? `<button class="big hot" id="tutnext">${finish}</button>` : `<button class="big" id="tutnext">Next</button>`}</div></div>
+    <div class="kicker">Arrow keys work too. ${last && s.status === 'lobby' ? 'This closes the slides and deals everyone their cards.' : ''}</div>`;
+}
+function wireTut(s) {
+  const on = (id, f) => { const b = document.getElementById(id); if (b) b.onclick = f; };
+  on('snd', () => act('sound', { on: s.sound === false }));
+  on('tutopen', tutOpen);
+  on('tuthide', () => { act('tutorial', { on: false, step: (s.tutorial || {}).step || 0 }); if (pausedForRules) { pausedForRules = false; act('resume', {}); } });
+  on('tutback', () => tutGo(-1));
+  on('tutnext', () => tutGo(1));
+}
+document.addEventListener('keydown', (e) => {
+  if (!PM.state || !(PM.state.tutorial || {}).on || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); tutGo(1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); tutGo(-1); }
+});
+
+function render(s) {
+  const cfg = PM.cfg;
+  const c = $('#controls');
+  const teams = teamsList(s);
+  const keep = {};
+  ['fr', 'mn', 'sp'].forEach((id) => { const el = document.getElementById(id); if (el) keep[id] = el.value; });
+  if (s.status === 'lobby') {
+    const open = [1, 2, 3, 4].filter((n) => !(s.teams || {})[n]);
+    c.innerHTML = `<div class="row" style="justify-content:space-between"><div><span class="head" style="font-size:24px">${teams.length} of 4 seats taken</span> <span class="muted">Teams open team.html. Put screen.html on the big screen.</span></div>
+      <div class="row"><button class="small" id="fill" ${open.length ? '' : 'disabled'}>Test mode: fill open seats with computer teams</button></div></div>
+      <div class="row" style="align-items:flex-end">
+        <label>Friday 17:00 cards<select id="fr">${[3, 4, 5, 6].map((n) => `<option value="${n}" ${n === (s.settings.fridays || 4) ? 'selected' : ''}>${n}${n === 3 ? ' · easy' : n === 4 ? ' · normal' : n === 5 ? ' · hard' : ' · brutal'}</option>`).join('')}</select></label>
+        <label>Minutes until go-live<input id="mn" type="number" min="5" max="120" value="${s.settings.minutes || 45}" style="width:120px"></label>
+        <label>Computer speed<select id="sp">${SPEEDS}</select></label>
+        <button class="big hot" id="start" ${teams.length < 2 ? 'disabled' : ''}>Start the day</button>
+      </div>`;
+    if (!keep.sp) $('#sp').value = '3';
+    Object.entries(keep).forEach(([id, v]) => { const el = document.getElementById(id); if (el) el.value = v; });
+    $('#start').onclick = startGame;
+    $('#fill').onclick = async () => { for (const n of open) await act('join', { team: String(n), bot: true }); };
+  } else {
+    const paused = s.clock && s.clock.pausedAt;
+    const active = activeTeamId(s);
+    c.innerHTML = `<div class="row" style="justify-content:space-between">
+      <div><span class="head" style="font-size:24px">${s.status === 'playing' ? 'Game in progress' : s.status === 'won' ? "People's Lovie Winner" : 'The client printed it out'}</span> <span class="muted">${s.status === 'playing' ? `· ${esc(s.teams[active].name)} · ${s.phase} · ${s.actionsLeft} actions left · turn ${s.turnCount || 1}` : esc(s.result ? s.result.reason : '')}</span></div>
+      <div class="row">
+        ${s.status === 'playing' ? `<button class="small ${paused ? 'hot' : ''}" data-a="${paused ? 'resume' : 'pause'}">${paused ? 'Resume clock' : 'Pause clock'}</button>
+        <button class="small" data-a="add_time">+5 minutes</button>
+        <button class="small" data-a="skip_turn">Skip to next team</button>
+        <button class="small hot" data-a="news">Breaking news now</button>
+        <label style="flex-direction:row;align-items:center;gap:8px">CPU speed<select id="spd" style="width:auto">${SPEEDS}</select></label>` : ''}
+        <button class="small" data-a="undo">Undo last step</button>
+        <button class="small danger" data-a="reset">Back to lobby</button>
+      </div></div>`;
+    const spd = $('#spd');
+    if (spd) { spd.value = String(s.settings.botDelay ?? 3); if (spd.selectedIndex < 0) spd.value = '3'; spd.onchange = () => act('speed', { botDelay: +spd.value }); }
+    c.querySelectorAll('[data-a]').forEach((b) => (b.onclick = () => {
+      const a = b.dataset.a;
+      if (a === 'reset' && !confirm('End this game and go back to the lobby? Teams stay joined.')) return;
+      if (a === 'skip_turn' && !confirm('Skip the rest of this turn?')) return;
+      act(a, a === 'reset' ? { keepTeams: true } : a === 'add_time' ? { seconds: 300 } : {});
+    }));
+    if (s.status === 'playing') {
+      const left = s.newsDeck || [];
+      c.insertAdjacentHTML('beforeend', `<div><div class="kicker" style="margin-bottom:8px">Fire a specific breaking news card${s.lastNews ? ' · last: ' + esc(s.lastNews.title) : ''}</div><div class="row">${Object.entries(cfg.news).map(([id, n]) => `<button class="small ${left.includes(id) ? '' : 'dark'}" data-news="${id}">${esc(n[0])}</button>`).join('')}</div></div>`);
+      c.querySelectorAll('[data-news]').forEach((b) => (b.onclick = () => { if (confirm('Fire this breaking news now?')) act('news', { id: b.dataset.news }); }));
+    }
+  }
+  c.insertAdjacentHTML('beforeend', tutBar(s));
+  wireTut(s);
+
+  $('#board').parentElement.style.display = s.status === 'lobby' ? 'none' : '';
+  if (s.status !== 'lobby') renderBoard($('#board'), s, { onRoom: (id) => fixRoom(id) });
+
+  $('#teams').innerHTML = teams.map((t) => `<div class="teamline"><div class="badge" style="background:${teamColor(t.id)}">${t.id}</div><div style="min-width:0"><div style="font-weight:800">${esc(t.name)}</div><div class="kicker" style="font-size:10px">${esc(t.members || '')}${t.role ? ' · ' + esc(cfg.roles[t.role].name) : ''}${t.role ? ' · stress ' + (t.stress || 0) + ' · handovers ' + (t.cookies || 0) : ''}${t.amsterdam ? ' · AMS' : ''}</div></div>
+    <div class="row" style="gap:6px">${s.status === 'lobby' ? `<button class="small dark" data-kick="${t.id}">Remove</button>` : ''}<button class="small ${t.bot ? 'hot' : ''}" data-bot="${t.id}" data-on="${t.bot ? 0 : 1}">${t.bot ? 'CPU' : 'Human'}</button></div></div>`).join('') || '<div class="muted">Nobody yet.</div>';
+  $('#teams').querySelectorAll('[data-kick]').forEach((b) => (b.onclick = () => act('leave', { team: b.dataset.kick })));
+  $('#teams').querySelectorAll('[data-bot]').forEach((b) => (b.onclick = () => act('set_bot', { team: b.dataset.bot, bot: b.dataset.on === '1' })));
+  $('#log').innerHTML = slackHTML(s.log, 80);
+}
+
+function fixRoom(id) {
+  const s = PM.state, cfg = PM.cfg;
+  if (cfg.rooms[id].special) return;
+  const rows = Object.entries(cfg.colors).map(([c, col]) => `<div class="row" style="justify-content:space-between">${glyph(c, 14)} <span style="flex:1;font-weight:700">${esc(col.name)} fires: ${s.fires[id][c]}</span><button class="small dark" data-c="${c}" data-d="-1">-</button><button class="small" data-c="${c}" data-d="1">+</button></div>`).join('');
+  modal(cfg.rooms[id].name, rows, (m) => m.querySelectorAll('[data-c]').forEach((b) => (b.onclick = async () => { await act('gm_fire', { room: id, color: b.dataset.c, delta: +b.dataset.d }); fixRoom(id); })));
+}
+
+function tick() {
+  if (PM.state && PM.state.status !== 'lobby') { $('#night').textContent = nightTime(); $('#real').textContent = fmtClock(clockNow()) + ' left'; }
+  setTimeout(tick, 500);
+}
+boot(render);
+tick();
+</script>
+</body>
+</html>

@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pandemonks · Team laptop</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"></div>
+<div id="eyes" class="eyes" style="display:none"><div class="kicker" style="color:#fff9">Pandemonks</div><div class="bigtitle" style="color:#fff">Eyes up!<span class="hand">look at the big screen</span></div><p class="head" style="color:#fffc;font-size:24px;max-width:560px">The Game Master is explaining how to play. Your cards show up here as soon as the day starts.</p></div>
+<script src="app.js"></script>
+<script src="help.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const ME = params.get('team');
+let pawnSel = null;
+let draft = {};
+
+function pickTeamScreen(s) {
+  $('#app').innerHTML = `<div class="page"><div class="kicker">Pandemonks · team laptop</div><div class="bigtitle">Which team<span class="hand">is this laptop?</span></div>
+  <div class="grid4">${[1, 2, 3, 4].map((n) => {
+    const t = (s.teams || {})[n];
+    return `<a class="tile paper" href="team.html?team=${n}"><div class="kicker" style="color:#6a6258">Team ${n}</div><div class="head">${t ? esc(t.name) : 'Open'}</div><div style="height:8px;background:${teamColor(String(n))};border:2px solid #000;margin-top:12px"></div></a>`;
+  }).join('')}</div></div>`;
+}
+
+function joinScreen(s) {
+  const t = (s.teams || {})[ME] || {};
+  const started = s.status !== 'lobby';
+  $('#app').innerHTML = `<div class="page" style="max-width:680px">
+    <div class="kicker">Team ${ME}</div>
+    <div class="bigtitle" style="font-size:96px">${t.name ? 'You are in.' : 'Clock in.'}<span class="hand">${t.name ? 'waiting for the day to start' : 'name your team'}</span></div>
+    ${t.bot ? `<div class="sticky" style="font-size:20px">This team is currently played by the computer. The Game Master can hand it back to you.</div>` : ''}
+    ${started && !t.name ? `<div class="panel">The night already started. Ask the Game Master to reset.</div>` : `
+    <div class="panel stack">
+      <label>Team name<input id="nm" maxlength="28" value="${esc(t.name || '')}" placeholder="The Dashboard Dodgers"></label>
+      <label>Who is playing<input id="mb" maxlength="80" value="${esc(t.members || '')}" placeholder="Names, comma separated"></label>
+      <label style="flex-direction:row;align-items:center;gap:10px;color:var(--paper)"><input type="checkbox" id="ams" ${t.amsterdam ? 'checked' : ''} style="width:22px;height:22px;box-shadow:none"> We play from AMS (start in the AMS Living Room)</label>
+      <div class="row"><button class="hot" id="join">${t.name ? 'Update' : 'Clock in as Team ' + ME}</button>${t.name ? '<button class="dark" id="leave">Leave</button>' : ''}<a href="team.html" class="muted" style="margin-left:auto">Wrong team?</a></div>
+    </div>`}
+  </div>`;
+  // keep what people typed when the screen refreshes because another team joined
+  ['nm', 'mb'].forEach((id) => { const el = $('#' + id); if (!el) return; if (draft[id] !== undefined) el.value = draft[id]; el.oninput = () => (draft[id] = el.value); });
+  const ams = $('#ams');
+  if (ams) { if (draft.ams !== undefined) ams.checked = draft.ams; ams.onchange = () => (draft.ams = ams.checked); }
+  const j = $('#join');
+  if (j) j.onclick = async () => { if (await act('join', { team: ME, name: $('#nm').value, members: $('#mb').value, amsterdam: $('#ams').checked })) { draft = {}; toast(t.name ? 'Updated' : 'You are in!'); } };
+  const l = $('#leave');
+  if (l) l.onclick = () => act('leave', { team: ME });
+}
+
+function gameScreen(s) {
+  const cfg = PM.cfg;
+  if (!$('#game')) {
+    $('#app').innerHTML = `<div class="team" id="game">
+      <header>
+        <div class="row" style="gap:14px"><div class="badge" style="width:54px;height:54px;font-size:28px;background:${teamColor(ME)}">${ME}</div><div><div class="kicker">Pandemonks · Go-Live!</div><div class="head" style="font-size:34px;line-height:1" id="tname"></div></div></div>
+        <div class="row" style="gap:16px"><div style="text-align:right"><div class="kicker">Office time</div><div class="lcd" id="night" style="font-size:36px;padding:4px 12px">09:00</div></div><div style="text-align:right"><div class="kicker">Left</div><div class="head" id="real" style="font-size:30px"></div></div></div>
+      </header>
+      <main><svg class="board" id="board" role="img" aria-label="Game board"></svg></main>
+      <aside id="side"></aside>
+    </div>`;
+  }
+  const me = s.teams[ME];
+  $('#tname').textContent = me.name;
+  const active = activeTeamId(s);
+  const myTurn = s.status === 'playing' && active === ME && !me.bot;
+  if (!pawnSel || !s.teams[pawnSel] || me.role !== 'planner' || !myTurn) pawnSel = ME;
+  const canAct = myTurn && s.phase === 'actions';
+
+  const hl = new Set();
+  if (canAct) for (const id of Object.keys(cfg.rooms)) if (moveOptions(s, pawnSel, id).length) hl.add(id);
+  renderBoard($('#board'), s, { highlight: hl, onRoom: (id) => roomClick(s, id) });
+
+  const loc = me.loc;
+  const room = cfg.rooms[loc];
+  const over = teamsList(s).filter((t) => (t.hand || []).length > cfg.handLimit);
+  let h = '';
+
+  if (me.bot) h += `<div class="sticky" style="font-size:17px">The computer is playing this team right now. Ask the Game Master to hand it back.</div>`;
+
+  // 1. turn box: whose turn, and very clearly how many actions are left
+  if (s.status !== 'playing') {
+    h += `<div class="panel turnbox mine"><div class="head">${s.status === 'won' ? 'Site is live.' : 'Account lost.'}</div><div style="margin-top:6px;font-weight:600">${esc(s.result ? s.result.reason : '')}</div></div>`;
+  } else if (myTurn) {
+    h += `<div class="panel turnbox mine">`;
+    if (s.phase === 'actions') {
+      h += `<div class="acount"><div class="num">${s.actionsLeft}</div><div><div class="head">action${s.actionsLeft === 1 ? '' : 's'} left ${helpBtn('actions')}</div><div class="bigpips">${Array.from({ length: Math.max(4, s.actionsLeft) }, (_, i) => `<span class="${i < s.actionsLeft ? 'on' : ''}"></span>`).join('')}</div></div>
+        <span class="row" style="margin-left:auto;align-self:flex-start;gap:4px"><button class="dark small" data-act="end_actions">End turn</button>${helpBtn('end_actions')}</span></div>
+        <div class="hint">Your turn. Talk first. Click a glowing room to move ${helpBtn('move')} (other office: +1 for the NS ${helpBtn('train')}).</div>`;
+    }
+    if (s.phase === 'draw') h += `<div class="head">Draw your cards ${helpBtn('draw')}</div><div class="hint">${s.log.slice(-3).some((l) => l.text.startsWith(me.name + ' is still in the chair massage')) ? 'You spent this turn in a chair massage. ' : ''}Then the crises flip by themselves.</div><button class="big" data-act="draw" style="margin-top:8px;width:100%">Draw 2 cards</button>`;
+    if (s.phase === 'infect') h += `<div class="head">Crises ${helpBtn('crises')}</div><div class="hint">${over.length ? `${over.map((t) => esc(t.name)).join(', ')} must get down to ${cfg.handLimit} cards first. The crises flip as soon as that is done.` : 'Flipping now. Eyes on the big screen.'}</div>`;
+    h += `</div>`;
+  } else {
+    const at = s.teams[active];
+    const ph = { actions: `${s.actionsLeft} action${s.actionsLeft === 1 ? '' : 's'} left`, draw: 'drawing cards', infect: 'flipping crises' }[s.phase];
+    h += `<div class="panel turnbox"><div class="row" style="justify-content:space-between"><div><div class="kicker">On shift now</div><div class="head" style="color:${teamColor(active)};font-size:26px">${esc(at.name)}${at.bot ? ' (CPU)' : ''}</div></div><div class="chip">${ph}</div></div><div class="hint">Advise them once. You can play event cards any time.</div></div>`;
+  }
+
+  // 2. everything you can do, compact, in a sensible order
+  if (s.status === 'playing') {
+    const fires = s.fires[loc] || {};
+    const others = teamsList(s).filter((t) => t.id !== ME && t.loc === loc);
+    const maxed = (me.stress || 0) >= cfg.maxStress;
+    const age = me.dashAge || 0;
+    const due = age >= cfg.dashboardEvery - 1 && !me.dashDone;
+    let a = `<div class="panel actpanel"><div class="row" style="justify-content:space-between;align-items:baseline"><div><span class="kicker">You are in</span> <span class="head" style="font-size:22px">${esc(room.name)}</span> ${helpBtn(roomHelpKey(s, loc))}</div><span class="kicker">${room.office === 'ams' ? 'AMS' : 'HPark'}${s.warRooms.includes(loc) ? ' · War Room' : ''}</span></div>`;
+    if (canAct && me.role === 'planner') a += `<div class="arow"><span class="alabel">Move ${helpBtn('pawn')}</span>${teamsList(s).map((t) => `<button class="small ${t.id === pawnSel ? 'hot' : 'dark'}" data-pawn="${t.id}">${t.id}</button>`).join('')}<span class="muted" style="font-size:12px">pick a pawn, then a room</span></div>`;
+    if (!room.special) {
+      const btns = Object.entries(fires).filter(([, n]) => n > 0).map(([c, n]) => `<button class="small" ${canAct ? '' : 'disabled'} data-act="treat" data-color="${c}">${glyph(c, 12)} Put out (${n})</button>`).join('');
+      a += `<div class="arow"><span class="alabel">Fires ${helpBtn('treat')}</span>${btns || '<span class="muted">None here.</span>'}</div>`;
+    }
+    let base = '';
+    if (!room.special && !s.warRooms.includes(loc)) {
+      const canBuild = me.role === 'ops' || me.hand.includes('r:' + loc);
+      base += `<button class="small" ${canAct && canBuild ? '' : 'disabled'} data-act="build" title="${me.role === 'ops' ? 'Free for the Ops Lead' : 'Costs the ' + esc(room.name) + ' card'}">Open a War Room</button>`;
+    }
+    if (s.warRooms.includes(loc)) {
+      const need = cfg.fixCards - (me.role === 'techlead' ? 1 : 0);
+      const thomas = s.effects && s.effects.thomas > (s.turnCount || 0);
+      base += Object.entries(cfg.colors).filter(([c]) => !s.cured[c]).map(([c, col]) => {
+        const have = me.hand.filter((x) => roomOf(x) && colorOfRoom(roomOf(x)) === c).length;
+        return `<button class="small ${have >= need && !thomas ? 'hot' : ''}" ${canAct && have >= need && !thomas ? '' : 'disabled'} data-act="cure" data-color="${c}">${glyph(c, 12)} ${esc(col.fix)} ${have}/${need}</button>`;
+      }).join('');
+      if (thomas) base += `<span class="muted" style="font-size:12px">Thomas has the approvals. Not this round.</span>`;
+    }
+    if (base) a += `<div class="arow"><span class="alabel">${s.warRooms.includes(loc) ? 'Deadlines ' + helpBtn('cure') : 'Build ' + helpBtn('build')}</span>${base}</div>`;
+    if (others.length && !room.special) {
+      let t = '';
+      for (const o of others) {
+        const give = me.hand.filter((c) => roomOf(c) && (me.role === 'account' || roomOf(c) === loc));
+        const take = (o.hand || []).filter((c) => roomOf(c) && (o.role === 'account' || roomOf(c) === loc));
+        t += `<span class="chip" style="background:${teamColor(o.id)};color:#000">${o.id}</span>`;
+        if (give.length) t += `<button class="small" ${canAct ? '' : 'disabled'} data-share="give" data-other="${o.id}">Give</button>`;
+        if (take.length) t += `<button class="small" ${canAct ? '' : 'disabled'} data-share="take" data-other="${o.id}">Take</button>`;
+        if (!give.length && !take.length) t += `<span class="muted" style="font-size:12px">no ${esc(room.name)} card</span>`;
+      }
+      a += `<div class="arow"><span class="alabel">Trade ${helpBtn('trade')}</span>${t}</div>`;
+    }
+    a += `<div class="arow"><span class="alabel">Extra</span>
+      <button class="small ${due ? 'hot' : ''}" ${canAct && !me.dashDone ? '' : 'disabled'} data-act="dashboard">${me.dashDone ? 'Dashboard ✓' : 'Update dashboard'}</button>${helpBtn('dashboard')}
+      <button class="small espresso" ${canAct && !s.espressoUsed && !maxed ? '' : 'disabled'} data-act="espresso">Espresso</button>${helpBtn('espresso')}
+      ${room.pantry ? `<button class="small" ${canAct && (me.stress || 0) > 0 ? '' : 'disabled'} data-act="breather">Stroopwafel (-1 stress)</button>${helpBtn('breather')}` : ''}
+      </div><div class="arow"><span class="alabel">Stress</span><span class="stresswrap"><span class="stressbar sm" title="Stress">${Array.from({ length: cfg.maxStress }, (_, i) => `<span class="${i < (me.stress || 0) ? (maxed ? 'max' : 'on') : ''}"></span>`).join('')}</span>${helpBtn('stress')}</span></div>`;
+    const notes = [];
+    if (due) notes.push([`Dashboard due: forget it and you lose ${cfg.handoverCost} actions next turn.`, 'dashboard']);
+    if (me.debt) notes.push([`Handover: ${me.debt} action${me.debt === 1 ? '' : 's'} less next turn.`, 'handover']);
+    if (me.minus) notes.push(['Timesheets: 1 action less next turn.', 'minus']);
+    if (me.owe) notes.push(['Hand in 1 room card for the hours (discard one).', 'owe']);
+    if (s.espressoUsed && myTurn) notes.push(['One espresso per turn.', 'espresso']);
+    if (notes.length) a += `<div class="anotes">${notes.map((n) => `<div>${esc(n[0])} ${helpBtn(n[1])}</div>`).join('')}</div>`;
+    h += a + `</div>`;
+  }
+
+  // 3. your hand, high up
+  const tooMany = me.hand.length > cfg.handLimit;
+  h += `<div class="panel"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Your hand · ${me.hand.length}/${cfg.handLimit} ${helpBtn('hand')}</h3><span class="kicker">describe, never show</span></div>${tooMany ? `<div class="caption" style="background:var(--red);margin:10px 0">Discard or play ${me.hand.length - cfg.handLimit}</div>` : ''}<div class="hand-cards" style="margin-top:10px">${me.hand.map((c) => {
+    const btns = me.bot ? '' : c.startsWith('e:') ? `<div class="actions"><button data-event="${c}">Play</button><button class="dark" data-discard="${c}">Drop</button></div>` : `<div class="actions"><button class="small" data-discard="${c}">Discard</button></div>`;
+    return cardHTML(c, 'mini', s.status === 'playing' ? btns : '');
+  }).join('') || '<div class="muted">No cards.</div>'}</div></div>`;
+
+  h += roleHTML(me.role);
+  h += `<div class="slack" style="min-height:260px;flex:none"><div class="top"><span># nl-monk-news</span></div><div class="msgs">${slackHTML(s.log, 8)}</div></div>`;
+
+  $('#side').innerHTML = h;
+  bindSide(s);
+  showMyDraw(s);
+}
+
+/* the cards you just drew show up on your own screen, not on the big one */
+let seenDraw = null;
+function showMyDraw(s) {
+  const d = s.lastDraw;
+  if (seenDraw === null) { seenDraw = d ? d.seq : 0; return; }
+  if (!d || d.seq === seenDraw) return;
+  seenDraw = d.seq;
+  if (d.team !== ME || s.teams[ME].bot) return;
+  const cards = d.cards || [];
+  const room = cards.filter((c) => c !== 'friday');
+  modal('Your new cards', `<div class="drawn">${cards.map((c, i) => cardHTML(c, 'big').replace('class="card', `style="animation-delay:${i * 0.25}s" class="card`)).join('')}</div>
+    <p class="muted" style="margin:0">${cards.includes('friday') ? 'Friday 17:00 came up: watch the big screen. ' : ''}${room.length ? 'They are in your hand now. Describe them, never show them.' : ''}</p><button class="hot" data-close>Got it</button>`);
+}
+
+function moveOptions(s, pawn, to) {
+  const cfg = PM.cfg;
+  const me = s.teams[ME];
+  const P = s.teams[pawn];
+  if (P.meditating) return [];
+  const loc = P.loc;
+  if (to === loc) return [];
+  const cross = cfg.rooms[loc].office !== cfg.rooms[to].office;
+  const noTrains = s.effects && s.effects.notrains > (s.turnCount || 0);
+  if (cross && noTrains) return [];
+  const cost = 1 + (cross ? cfg.trainCost : 0);
+  if (s.actionsLeft < cost) return [];
+  const extra = pawn !== ME ? { pawn } : {};
+  const ns = cross ? ' + the NS' : '';
+  const o = [];
+  if (neighbours(loc).includes(to)) o.push({ type: 'walk', help: cross ? 'train' : 'walk', label: cross ? 'Take the NS Intercity' : 'Walk over', note: cross ? 'HPark and AMS are a train ride apart' : 'Connected room', p: { to, ...extra }, cost });
+  if (s.warRooms.includes(loc) && s.warRooms.includes(to)) o.push({ type: 'hop', help: 'hop', label: 'War Room hop', note: 'Both have a War Room' + ns, p: { to, ...extra }, cost });
+  if (!cfg.rooms[to].special && me.hand.includes('r:' + to)) o.push({ type: 'direct', help: 'direct', label: 'Send a DM and go', note: `Discard your ${cfg.rooms[to].name} card` + ns, p: { to, ...extra }, cost });
+  if (!cfg.rooms[loc].special && me.hand.includes('r:' + loc)) o.push({ type: 'allhands', help: 'allhands', label: 'Call an all-hands', note: `Discard your ${cfg.rooms[loc].name} card, go anywhere` + ns, p: { to, ...extra }, cost });
+  if (me.role === 'ops' && pawn === ME && !s.opsMoveUsed && s.warRooms.includes(loc) && me.hand.some((c) => roomOf(c))) o.push({ type: 'opsmove', help: 'opsmove', label: 'Ops shortcut', note: 'Discard any room card (once per turn)' + ns, p: { to }, pickCard: true, cost });
+  if (me.role === 'planner' && teamsList(s).some((t) => t.id !== pawn && t.loc === to)) o.push({ type: 'gather', help: 'gather', label: 'Pull them in', note: 'Move to a room where another team stands' + ns, p: { to, pawn }, cost });
+  return o;
+}
+
+function roomHelpKey(s, id) {
+  const r = PM.cfg.rooms[id];
+  if (id === 'hlive' || id === 'alive') return 'room:living';
+  if (r.pantry) return 'room:pantry';
+  return s.warRooms.includes(id) ? 'room:warroom' : 'room:normal';
+}
+
+function roomClick(s, id) {
+  const cfg = PM.cfg;
+  const r = cfg.rooms[id];
+  const fires = Object.entries(s.fires[id] || {}).filter(([, n]) => n > 0).map(([c, n]) => `${glyph(c, 13)} ${n} ${esc(cfg.colors[c].name)} fire${n === 1 ? '' : 's'}`).join(' &nbsp; ') || 'No fires';
+  const here = teamsList(s).filter((t) => t.loc === id).map((t) => esc(t.name)).join(', ') || 'nobody';
+  const canAct = s.status === 'playing' && activeTeamId(s) === ME && s.phase === 'actions' && !s.teams[ME].bot;
+  const opts = canAct ? moveOptions(s, pawnSel, id) : [];
+  const who = pawnSel === ME ? 'your team' : esc(s.teams[pawnSel].name);
+  let body = `<div class="muted">${helpBtn(roomHelpKey(s, id))} ${r.office === 'ams' ? 'AMS' : 'HPark'}${r.special ? '' : ' · ' + esc(cfg.colors[r.color].zone)}${s.warRooms.includes(id) ? ' · War Room' : ''}</div><div>${fires}</div><div class="muted">Here: ${here}</div>`;
+  if (opts.length) {
+    body += `<h3 style="margin-top:8px">Move ${who} here</h3>` + opts.map((o, i) => `<div class="optrow"><button class="opt" data-opt="${i}"><span>${o.label}<small>${esc(o.note)}</small></span><span>${o.cost} action${o.cost === 1 ? '' : 's'}</span></button>${helpBtn(o.help)}</div>`).join('') + `<div id="opscard"></div>`;
+  } else if (canAct) body += `<div class="muted">You cannot get there right now${s.effects && s.effects.notrains > (s.turnCount || 0) && cfg.rooms[id].office !== cfg.rooms[s.teams[pawnSel].loc].office ? ': no trains today' : ''}.</div>`;
+  modal(r.name, body, (m) => {
+    m.querySelectorAll('[data-opt]').forEach((b) => b.addEventListener('click', async () => {
+      const o = opts[+b.dataset.opt];
+      if (o.pickCard) {
+        const cards = [...new Set(s.teams[ME].hand.filter((c) => roomOf(c)))];
+        $('#opscard', m).innerHTML = `<h3>Which card do you discard?</h3><div class="row">${cards.map((c) => `<button class="small" data-c="${c}">${esc(cfg.rooms[roomOf(c)].name)}</button>`).join('')}</div>`;
+        $('#opscard', m).querySelectorAll('[data-c]').forEach((cb) => cb.addEventListener('click', async () => { if (await act(o.type, { team: ME, ...o.p, card: cb.dataset.c })) closeModal(); }));
+        return;
+      }
+      if (await act(o.type, { team: ME, ...o.p })) closeModal();
+    }));
+  });
+}
+
+function bindSide(s) {
+  const cfg = PM.cfg;
+  const side = $('#side');
+  side.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => {
+    const type = b.dataset.act;
+    if (type === 'build' && s.warRooms.length >= cfg.maxWarRooms) {
+      modal('Close a War Room', `<p class="muted">There are already ${cfg.maxWarRooms} War Rooms. Pick one to close.</p>${s.warRooms.map((w) => `<button class="opt" data-w="${w}">${esc(cfg.rooms[w].name)}</button>`).join('')}`, (m) => {
+        m.querySelectorAll('[data-w]').forEach((x) => x.addEventListener('click', async () => { if (await act('build', { team: ME, remove: x.dataset.w })) closeModal(); }));
+      });
+      return;
+    }
+    if (type === 'end_actions' && !confirm('End your turn now? You still have ' + PM.state.actionsLeft + ' action(s).')) return;
+    if (type === 'espresso' && !confirm('Pull an espresso? You do not know which one you get.')) return;
+    act(type, { team: ME, color: b.dataset.color });
+  }));
+  side.querySelectorAll('[data-pawn]').forEach((b) => b.addEventListener('click', () => { pawnSel = b.dataset.pawn; gameScreen(s); }));
+  side.querySelectorAll('[data-discard]').forEach((b) => b.addEventListener('click', () => { if (confirm('Discard this card?')) act('discard', { team: ME, card: b.dataset.discard }); }));
+  side.querySelectorAll('[data-share]').forEach((b) => b.addEventListener('click', () => {
+    const dir = b.dataset.share, other = b.dataset.other;
+    const me = s.teams[ME], o = s.teams[other];
+    const src = dir === 'give' ? me : o;
+    const cards = [...new Set(src.hand.filter((c) => roomOf(c) && (src.role === 'account' || roomOf(c) === me.loc)))];
+    modal(dir === 'give' ? `Give to ${o.name}` : `Take from ${o.name}`, `<p class="muted">Agree on it out loud first.</p>${cards.map((c) => `<button class="opt" data-c="${c}">${esc(cfg.rooms[roomOf(c)].name)}<span>${glyph(colorOfRoom(roomOf(c)), 14)}</span></button>`).join('')}`, (m) => {
+      m.querySelectorAll('[data-c]').forEach((x) => x.addEventListener('click', async () => { if (await act(dir, { team: ME, other, card: x.dataset.c })) closeModal(); }));
+    });
+  }));
+  side.querySelectorAll('[data-event]').forEach((b) => b.addEventListener('click', () => playEventUI(s, b.dataset.event)));
+}
+
+function playEventUI(s, card) {
+  const cfg = PM.cfg;
+  const ev = card.slice(2);
+  const e = cfg.events[ev];
+  const send = async (p) => { if (await act('event', { team: ME, card, ...p })) closeModal(); };
+  if (ev === 'holiday' || ev === 'dog') { modal(e.name, `<p>${esc(e.text)}</p><button class="hot" data-go>Play it</button>`, (m) => ($('[data-go]', m).onclick = () => send({}))); return; }
+  if (ev === 'freelancer') {
+    modal(e.name, `<p>${esc(e.text)}</p><label>Team<select id="ep">${teamOptions(s, ME)}</select></label><label>To<select id="er">${roomOptions()}</select></label><button class="hot" data-go>Play it</button>`, (m) => ($('[data-go]', m).onclick = () => send({ pawn: $('#ep').value, to: $('#er').value })));
+    return;
+  }
+  if (ev === 'budget') {
+    const full = s.warRooms.length >= cfg.maxWarRooms;
+    modal(e.name, `<p>${esc(e.text)}</p><label>Room<select id="er">${roomOptions('', true)}</select></label>${full ? `<label>Close this War Room<select id="ex">${s.warRooms.map((w) => `<option value="${w}">${esc(cfg.rooms[w].name)}</option>`).join('')}</select></label>` : ''}<button class="hot" data-go>Play it</button>`, (m) => ($('[data-go]', m).onclick = () => send({ room: $('#er').value, remove: full ? $('#ex').value : '' })));
+    return;
+  }
+  if (ev === 'tiramisu') {
+    const rooms = Object.entries(s.fires).filter(([, f]) => Object.values(f).some((n) => n > 0));
+    modal(e.name, `<p>${esc(e.text)}</p><label>Room<select id="er">${rooms.map(([r, f]) => `<option value="${r}">${esc(cfg.rooms[r].name)} (${Object.values(f).reduce((a, b) => a + b, 0)} fires)</option>`).join('')}</select></label><button class="hot" data-go>Serve the tiramisu</button>`, (m) => ($('[data-go]', m).onclick = () => send({ room: $('#er').value })));
+    return;
+  }
+  if (ev === 'pizza') {
+    const opts = [];
+    for (const [room, f] of Object.entries(s.fires)) for (const [c, n] of Object.entries(f)) if (n > 0) opts.push({ room, c, n });
+    const sel = (id) => `<select id="${id}"><option value="">(none)</option>${opts.map((o) => `<option value="${o.room}|${o.c}">${esc(cfg.rooms[o.room].name)} · ${esc(cfg.colors[o.c].name)} (${o.n})</option>`).join('')}</select>`;
+    modal(e.name, `<p>${esc(e.text)}</p><label>First bonbon${sel('f1')}</label><label>Second bonbon${sel('f2')}</label><button class="hot" data-go>Hand out the bonbons</button>`, (m) => ($('[data-go]', m).onclick = () => send({ fires: ['#f1', '#f2'].map((x) => $(x).value).filter(Boolean).map((v) => ({ room: v.split('|')[0], color: v.split('|')[1] })) })));
+  }
+}
+
+function render(s) {
+  const tut = s.tutorial && s.tutorial.on;
+  $('#eyes').style.display = tut && ME ? 'flex' : 'none';
+  document.body.style.overflow = tut && ME ? 'hidden' : '';
+  if (!ME || !['1', '2', '3', '4'].includes(ME)) return pickTeamScreen(s);
+  const t = (s.teams || {})[ME];
+  if (!t || s.status === 'lobby' || !t.role) {
+    if (!(document.activeElement && document.activeElement.tagName === 'INPUT')) joinScreen(s);
+    return;
+  }
+  gameScreen(s);
+}
+
+function tick() {
+  if ($('#night') && PM.state) {
+    const left = clockNow();
+    $('#night').textContent = nightTime();
+    $('#night').className = 'lcd' + (left <= 60 ? ' crit' : left <= 300 ? ' warn' : '');
+    $('#real').textContent = fmtClock(left);
+  }
+  setTimeout(tick, 400);
+}
+boot(render);
+tick();
+</script>
+</body>
+</html>
